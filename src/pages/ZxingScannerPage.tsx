@@ -1,5 +1,11 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import {
+  addScanToList,
+  formatScanListForClipboard,
+  totalScanCount,
+  type ScanListEntry,
+} from '../utils/scanList'
 import { BrowserCodeReader, BrowserMultiFormatReader } from '@zxing/browser'
 import type { IScannerControls } from '@zxing/browser'
 import { BarcodeFormat, DecodeHintType, type Result } from '@zxing/library'
@@ -198,8 +204,7 @@ function formatsForMode(mode: ZxingFormatMode): BarcodeFormat[] {
 }
 
 export default function ZxingScannerPage() {
-  const [lastText, setLastText] = useState<string | null>(null)
-  const [lastFormat, setLastFormat] = useState<string | null>(null)
+  const [scanList, setScanList] = useState<ScanListEntry[]>([])
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(true)
   const [formatMode, setFormatMode] = useState<ZxingFormatMode>('lean')
@@ -230,8 +235,8 @@ export default function ZxingScannerPage() {
     const onResult = (result: Result | undefined): void => {
       if (myGen !== scanGenRef.current || !result) return
       const text = result.getText()
-      setLastText(text)
-      setLastFormat(String(result.getBarcodeFormat()))
+      const fmt = String(result.getBarcodeFormat())
+      setScanList((prev) => addScanToList(prev, text, fmt))
       playTing()
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
         navigator.vibrate(20)
@@ -294,6 +299,18 @@ export default function ZxingScannerPage() {
       }
     }
   }, [formatMode, tryHarder])
+
+  const copyAll = async () => {
+    if (!scanList.length) return
+    try {
+      await navigator.clipboard.writeText(formatScanListForClipboard(scanList))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const clearList = () => setScanList([])
+  const totalScans = totalScanCount(scanList)
 
   return (
     <div className="box-border flex min-h-dvh flex-col bg-linear-to-br from-[#0c1220] via-[#0a0f18] to-[#0d1520] pb-[calc(env(safe-area-inset-bottom)+12px)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)] text-left text-[#e8e6ed]">
@@ -418,23 +435,67 @@ export default function ZxingScannerPage() {
         )}
       </div>
 
-      <section className="mx-3 mt-4 shrink-0 rounded-2xl border border-sky-500/20 bg-[rgba(15,23,42,0.85)] p-4 backdrop-blur-md sm:mx-auto sm:mt-5 sm:max-w-2xl">
-        <p className="mb-2 text-xs uppercase tracking-wide text-[#64748b]">
-          Kết quả
-        </p>
-        {lastFormat && (
-          <p className="mb-2 font-mono text-xs text-sky-300/90">{lastFormat}</p>
-        )}
-        {lastText ? (
-          <code className="block whitespace-pre-wrap wrap-break-word rounded-lg bg-black/40 px-3 py-2.5 font-mono text-sm leading-relaxed text-emerald-200">
-            {lastText}
-          </code>
-        ) : (
-          <span className="text-sm text-[#64748b]">
-            Giữ mã nằm ngang, cách vừa phải; nếu lâu không đọc — bật “Bám mã
-            khó” hoặc đèn.
-          </span>
-        )}
+      <section className="mx-3 mt-4 flex min-h-0 flex-1 flex-col rounded-2xl border border-sky-500/20 bg-[rgba(15,23,42,0.85)] p-4 backdrop-blur-md sm:mx-auto sm:mt-5 sm:max-w-2xl">
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <p className="text-xs uppercase tracking-wide text-[#64748b]">
+              Danh sách mã
+            </p>
+            <span className="text-sm text-[#94a3b8]">
+              Tổng lượt quét:{' '}
+              <strong className="font-semibold text-sky-200">{totalScans}</strong>
+            </span>
+          </div>
+          {scanList.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-sky-400/40 bg-sky-500/15 px-3 py-1.5 text-sm text-sky-100 active:scale-[0.98]"
+                onClick={() => void copyAll()}
+              >
+                Sao chép tất cả
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-zinc-500/50 bg-zinc-800/80 px-3 py-1.5 text-sm text-[#94a3b8] active:scale-[0.98]"
+                onClick={clearList}
+              >
+                Xóa danh sách
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="max-h-[min(50vh,320px)] min-h-0 overflow-y-auto">
+          {scanList.length > 0 ? (
+            <ul className="space-y-2 pr-1">
+              {scanList.map((row) => (
+                <li
+                  key={row.text}
+                  className="rounded-lg border border-sky-500/15 bg-black/35 px-3 py-2.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <code className="block flex-1 whitespace-pre-wrap wrap-break-word font-mono text-sm leading-relaxed text-emerald-200">
+                      {row.text}
+                    </code>
+                    <span className="shrink-0 rounded-md bg-sky-500/25 px-2 py-0.5 text-xs font-semibold tabular-nums text-sky-100">
+                      ×{row.count}
+                    </span>
+                  </div>
+                  {row.format && (
+                    <p className="mt-1 font-mono text-[11px] text-sky-300/85">
+                      {row.format}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <span className="text-sm text-[#64748b]">
+              Giữ mã nằm ngang — quét để lưu (trùng mã thì tăng số lần). Nếu lâu
+              không đọc — bật “Bám mã khó” hoặc đèn.
+            </span>
+          )}
+        </div>
       </section>
     </div>
   )

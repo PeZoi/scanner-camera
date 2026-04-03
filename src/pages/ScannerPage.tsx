@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode'
+import type { Html5QrcodeResult } from 'html5-qrcode'
+import {
+  addScanToList,
+  formatScanListForClipboard,
+  totalScanCount,
+  type ScanListEntry,
+} from '../utils/scanList'
 
 const READER_ID = 'qr-reader'
 
@@ -8,17 +15,17 @@ const READER_ID = 'qr-reader'
 const MIN_QR_BOX = 50
 
 /** Tốc độ quét (FPS) — cao hơn mặc định (~10) để phản hồi gần máy quét. */
-const SCAN_FPS = 25
+const SCAN_FPS = 18
 
 /** FPS khi bật chế độ decode nhanh (nhiều khung hơn / giây — tốn CPU hơn). */
-const SCAN_FPS_FAST = 30
+const SCAN_FPS_FAST = 22
 
 /** Sau mỗi lần đọc mã thành công: chờ trước khi cho quét tiếp (tránh trùng lặp). */
 const COOLDOWN_MS = 1000
 
 let scanSuccessAudioCtx: AudioContext | null = null
 
-/** Tiếng "ting" ngắn (Web Audio — không cần file .mp3). */
+/** Tiếng "bíp" ngắn (Web Audio — không cần file .mp3). */
 function playScanSuccessTing(): void {
   if (typeof window === 'undefined') return
   try {
@@ -33,18 +40,30 @@ function playScanSuccessTing(): void {
     const ctx = scanSuccessAudioCtx
     void ctx.resume()
     const t0 = ctx.currentTime
-    const osc = ctx.createOscillator()
-    const gain = ctx.createGain()
-    osc.type = 'sine'
-    osc.frequency.setValueAtTime(1046.5, t0)
-    osc.frequency.exponentialRampToValueAtTime(1568, t0 + 0.07)
-    gain.gain.setValueAtTime(0.0001, t0)
-    gain.gain.exponentialRampToValueAtTime(0.11, t0 + 0.015)
-    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.11)
-    osc.connect(gain)
-    gain.connect(ctx.destination)
-    osc.start(t0)
-    osc.stop(t0 + 0.12)
+
+    const playBeep = (freq: number, start: number, durationSec: number) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'square'
+      osc.frequency.setValueAtTime(freq, start)
+
+      // Envelope nhanh để ra "bíp" giống máy quét.
+      gain.gain.setValueAtTime(0.0001, start)
+      gain.gain.exponentialRampToValueAtTime(0.12, start + 0.01)
+      gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        start + durationSec,
+      )
+
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(start)
+      osc.stop(start + durationSec + 0.03)
+    }
+
+    // "Bíp bíp" (2 tiếng ngắn, có khoảng cách rất nhỏ).
+    playBeep(1500, t0 + 0.00, 0.055)
+    playBeep(2000, t0 + 0.085, 0.065)
   } catch {
     /* ignore */
   }
@@ -52,8 +71,8 @@ function playScanSuccessTing(): void {
 
 /** Độ phân giải ưu tiên: barcode rõ nét hơn (camera sẽ tự giảm nếu không hỗ trợ). */
 const VIDEO_IDEAL = {
-  width: { ideal: 1920 },
-  height: { ideal: 1080 },
+  width: { min: 1280, ideal: 1920 },
+  height: { min: 720, ideal: 1080 },
   frameRate: { ideal: 30, max: 30 },
 } as const
 
@@ -75,6 +94,56 @@ function buildPremiumVideoConstraints(): MediaTrackConstraints {
   }
 }
 
+/** Sau khi `start()` — áp lại focus/ phơi sáng (một số thiết bị chỉ áp dụng sau stream chạy). */
+async function enableAutoFocus(scanner: Html5Qrcode): Promise<void> {
+  try {
+    await scanner.applyVideoConstraints({
+      advanced: [
+        { focusMode: 'continuous' },
+        { exposureMode: 'continuous' },
+        { whiteBalanceMode: 'continuous' },
+      ],
+    } as unknown as MediaTrackConstraints)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Zoom tối đa 2× nếu camera hỗ trợ (sau khi stream đã chạy). */
+async function enableAutoZoom(scanner: Html5Qrcode): Promise<void> {
+  try {
+    const anyScanner = scanner as unknown as {
+      getRunningTrack?: () => MediaStreamTrack | undefined
+    }
+    let track =
+      typeof anyScanner.getRunningTrack === 'function'
+        ? anyScanner.getRunningTrack()
+        : undefined
+    if (!track) {
+      const video = document.querySelector(
+        `#${READER_ID} video`,
+      ) as HTMLVideoElement | null
+      const stream = video?.srcObject as MediaStream | null
+      track = stream?.getVideoTracks()[0]
+    }
+    if (!track) return
+
+    const caps = track.getCapabilities() as MediaTrackCapabilities & {
+      zoom?: { min?: number; max?: number }
+    }
+    const zoom = caps.zoom
+    if (zoom == null || typeof zoom !== 'object' || typeof zoom.max !== 'number') {
+      return
+    }
+
+    await track.applyConstraints({
+      advanced: [{ zoom: Math.min(zoom.max, 2.0) }],
+    } as unknown as MediaTrackConstraints)
+  } catch {
+    /* ignore */
+  }
+}
+
 const FORMATS_POS: Html5QrcodeSupportedFormats[] = [
   Html5QrcodeSupportedFormats.QR_CODE,
   Html5QrcodeSupportedFormats.EAN_13,
@@ -90,16 +159,11 @@ const FORMATS_POS: Html5QrcodeSupportedFormats[] = [
   Html5QrcodeSupportedFormats.PDF_417,
 ]
 
-/**
- * Ít định dạng hơn → mỗi khung hình decoder thử ít loại mã hơn → thường nhanh hơn.
- * Bỏ ITF, Codabar, PDF417, Data Matrix, Code93 nếu bạn không cần.
- */
-const FORMATS_LEAN: Html5QrcodeSupportedFormats[] = [
-  Html5QrcodeSupportedFormats.QR_CODE,
+/** Chế độ khung ngang: chỉ barcode POS phổ biến — decoder nhẹ nhất. */
+const BARCODE_ONLY: Html5QrcodeSupportedFormats[] = [
   Html5QrcodeSupportedFormats.EAN_13,
   Html5QrcodeSupportedFormats.EAN_8,
   Html5QrcodeSupportedFormats.CODE_128,
-  Html5QrcodeSupportedFormats.CODE_39,
   Html5QrcodeSupportedFormats.UPC_A,
   Html5QrcodeSupportedFormats.UPC_E,
 ]
@@ -163,7 +227,7 @@ const FRAME_MODES: Record<
 }
 
 export default function ScannerPage() {
-  const [lastText, setLastText] = useState<string | null>(null)
+  const [scanList, setScanList] = useState<ScanListEntry[]>([])
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(true)
   const [torchSupported, setTorchSupported] = useState(false)
@@ -180,7 +244,8 @@ export default function ScannerPage() {
     root?.classList.add('scanner-full')
 
     let cancelled = false
-    const formats = fastDecode ? FORMATS_LEAN : FORMATS_POS
+    const formats =
+      frameMode === 'horizontal' ? BARCODE_ONLY : FORMATS_POS
     const scanner = new Html5Qrcode(READER_ID, {
       verbose: false,
       formatsToSupport: formats,
@@ -233,9 +298,8 @@ export default function ScannerPage() {
 
       const frame = FRAME_MODES[frameMode]
       const baseConfig = {
-        fps: fastDecode ? SCAN_FPS_FAST : SCAN_FPS,
+        fps: effectiveFps,
         qrbox: frame.qrbox,
-        aspectRatio: frame.aspectRatio,
       } as const
 
       const tryStart = async (usePremiumConstraints: boolean) => {
@@ -244,10 +308,14 @@ export default function ScannerPage() {
           usePremiumConstraints
             ? { ...baseConfig, videoConstraints: buildPremiumVideoConstraints() }
             : baseConfig,
-          (decodedText) => {
+          (decodedText, result: Html5QrcodeResult) => {
             if (cancelled || !gateOpen) return
             gateOpen = false
-            setLastText(decodedText)
+            const fmt =
+              result?.result?.format != null
+                ? String(result.result.format)
+                : null
+            setScanList((prev) => addScanToList(prev, decodedText, fmt))
             playScanSuccessTing()
             if (typeof navigator !== 'undefined' && navigator.vibrate) {
               navigator.vibrate(25)
@@ -274,6 +342,8 @@ export default function ScannerPage() {
           },
           () => {},
         )
+        await enableAutoFocus(scanner)
+        await enableAutoZoom(scanner)
       }
 
       try {
@@ -327,7 +397,7 @@ export default function ScannerPage() {
       scannerRef.current = null
       safeShutdown()
     }
-  }, [frameMode, fastDecode])
+  }, [frameMode, fastDecode, effectiveFps])
 
   const toggleTorch = useCallback(() => {
     const scanner = scannerRef.current
@@ -342,14 +412,17 @@ export default function ScannerPage() {
     }
   }, [torchOn])
 
-  const copyResult = async () => {
-    if (!lastText) return
+  const copyAll = async () => {
+    if (!scanList.length) return
     try {
-      await navigator.clipboard.writeText(lastText)
+      await navigator.clipboard.writeText(formatScanListForClipboard(scanList))
     } catch {
       /* ignore */
     }
   }
+
+  const clearList = () => setScanList([])
+  const totalScans = totalScanCount(scanList)
 
   return (
     <div
@@ -400,9 +473,9 @@ export default function ScannerPage() {
             onChange={(e) => setFastDecode(e.target.checked)}
           />
           <span>
-            <strong className="text-[#e4dff0]">Decode nhanh</strong> — 30 FPS,
-            chỉ QR + EAN + Code128/39 + UPC (bỏ ITF, Codabar, PDF417, Data
-            Matrix…). Tắt nếu cần đủ loại mã.
+            <strong className="text-[#e4dff0]">Decode nhanh</strong> — FPS cao
+            hơn. Định dạng: khung ngang = chỉ EAN/Code128/UPC; khung vuông = đủ
+            loại (QR, Data Matrix…).
           </span>
         </label>
       </header>
@@ -435,7 +508,7 @@ export default function ScannerPage() {
           )}
           <div
             id={READER_ID}
-            className="size-full min-h-0 [&_video]:h-full! [&_video]:w-full! [&_video]:rounded-xl [&_video]:object-cover"
+            className="size-full min-h-0 [&_video]:h-full! [&_video]:w-full! [&_video]:rounded-xl"
           />
         </div>
         {torchSupported && !error && (
@@ -456,31 +529,67 @@ export default function ScannerPage() {
       </div>
 
       <section
-        className="mx-3 mt-4 shrink-0 rounded-2xl border border-purple-500/15 bg-[rgba(30,28,42,0.85)] p-4 backdrop-blur-md sm:mx-auto sm:mt-5 sm:max-w-lg"
+        className="mx-3 mt-4 flex min-h-0 flex-1 flex-col rounded-2xl border border-purple-500/15 bg-[rgba(30,28,42,0.85)] p-4 backdrop-blur-md sm:mx-auto sm:mt-5 sm:max-w-lg"
         aria-live="polite"
       >
-        <div className="mb-2.5 flex items-center justify-between gap-3">
-          <span className="text-xs uppercase tracking-[0.08em] text-[#9b92b0]">
-            Kết quả gần nhất
-          </span>
-          {lastText && (
-            <button
-              type="button"
-              className="cursor-pointer rounded-lg border border-purple-400/35 bg-purple-500/10 px-3 py-1.5 text-sm text-[#e9d5ff] active:scale-[0.98]"
-              onClick={copyResult}
-            >
-              Sao chép
-            </button>
-          )}
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="text-xs uppercase tracking-[0.08em] text-[#9b92b0]">
+              Danh sách mã
+            </span>
+            <span className="text-sm text-[#a89bc4]">
+              Tổng lượt quét:{' '}
+              <strong className="font-semibold text-[#e9d5ff]">{totalScans}</strong>
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {scanList.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  className="cursor-pointer rounded-lg border border-purple-400/35 bg-purple-500/10 px-3 py-1.5 text-sm text-[#e9d5ff] active:scale-[0.98]"
+                  onClick={() => void copyAll()}
+                >
+                  Sao chép tất cả
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-zinc-500/50 bg-zinc-800/80 px-3 py-1.5 text-sm text-[#c4b8dc] active:scale-[0.98]"
+                  onClick={clearList}
+                >
+                  Xóa danh sách
+                </button>
+              </>
+            )}
+          </div>
         </div>
-        <div className="wrap-break-word">
-          {lastText ? (
-            <code className="block whitespace-pre-wrap rounded-lg bg-black/35 px-3 py-2.5 font-mono text-sm leading-relaxed text-[#c8f5c4]">
-              {lastText}
-            </code>
+        <div className="max-h-[min(50vh,320px)] min-h-0 overflow-y-auto wrap-break-word">
+          {scanList.length > 0 ? (
+            <ul className="space-y-2 pr-1">
+              {scanList.map((row) => (
+                <li
+                  key={row.text}
+                  className="rounded-lg border border-purple-500/10 bg-black/30 px-3 py-2.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <code className="block flex-1 whitespace-pre-wrap font-mono text-sm leading-relaxed text-[#c8f5c4]">
+                      {row.text}
+                    </code>
+                    <span className="shrink-0 rounded-md bg-purple-500/25 px-2 py-0.5 text-xs font-semibold tabular-nums text-[#e9d5ff]">
+                      ×{row.count}
+                    </span>
+                  </div>
+                  {row.format && (
+                    <p className="mt-1 font-mono text-[11px] text-purple-300/80">
+                      {row.format}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
           ) : (
             <span className="text-sm text-[#6d6578]">
-              Chưa có dữ liệu — quét để thử
+              Chưa có mã — quét để lưu vào danh sách (trùng mã thì tăng số lần).
             </span>
           )}
         </div>

@@ -7,7 +7,7 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   optimizeDeps: {
     /** Giảm lỗi "Importing a module script failed" khi Vite pre-bundle đổi (HMR reload). */
-    include: ['@zxing/browser', '@zxing/library'],
+    include: ['@zxing/browser', '@zxing/library', 'scanbot-web-sdk', 'scanbot-web-sdk/ui'],
   },
   plugins: [
     react(),

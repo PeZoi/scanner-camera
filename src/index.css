@@ -70,6 +70,13 @@
   border-inline: none;
 }
 
+/* html5-qrcode: ổn định hướng hiển thị barcode trên video */
+#qr-reader video {
+  object-fit: cover;
+  transform: scale(1.02);
+  filter: contrast(1.25) brightness(1.05);
+}
+
 body {
   margin: 0;
 }
