@@ -5,6 +5,7 @@ import HomePage from './pages/HomePage'
 const ScannerPage = lazy(() => import('./pages/ScannerPage'))
 const ZxingScannerPage = lazy(() => import('./pages/ZxingScannerPage'))
 const ScanbotBarcodePage = lazy(() => import('./pages/ScanbotBarcodePage'))
+const PyBarcodeScannerPage = lazy(() => import('./pages/PyBarcodeScannerPage'))
 
 function ScannerFallback() {
   return (
@@ -48,6 +49,14 @@ export default function App() {
         element={
           <Suspense fallback={<ScannerFallback />}>
             <ScanbotBarcodePage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/scanner-pybarcode"
+        element={
+          <Suspense fallback={<ScannerFallback />}>
+            <PyBarcodeScannerPage />
           </Suspense>
         }
       />

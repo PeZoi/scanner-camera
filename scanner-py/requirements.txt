@@ -1,0 +1,15 @@
+# Chạy: python -m pip install -r requirements.txt
+#       python server.py
+# Cổng bận (WinError 10048): tắt tiến trình cũ hoặc đặt PY_BARCODE_PORT=8766
+# (thêm cùng giá trị vào file .env ở thư mục frontend để Vite proxy khớp).
+#
+# Giải mã chính: OpenCV BarcodeDetector (không cần ZBar DLL trên Windows).
+# pyzbar: tùy chọn — nếu cài được + có DLL ZBar thì dùng thêm khi OpenCV không đọc được.
+#
+# Tuỳ chọn môi trường:
+#   BARCODE_DECODE_WORKERS=8   — số thread decode (mặc định max(4, cpu+2), tối đa 16).
+#   STRICT_GTIN=true             — chỉ trả mã số 8/12/13 nếu đúng checksum GS1.
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+websockets>=12.0
+pyzbar>=0.1.9

@@ -14,6 +14,9 @@ export default function HomePage() {
           <Link className="scanner-entry" to="/scanner-scanbot">
             Scanner Scanbot SDK (barcode)
           </Link>
+          <Link className="scanner-entry" to="/scanner-pybarcode">
+            Scanner Python (OpenCV + pyzbar + WS)
+          </Link>
         </div>
         
     </>
